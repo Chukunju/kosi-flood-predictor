@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Kosi Flood Risk Dashboard</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+<style>
+  body { font-family: 'Segoe UI', sans-serif; background: #0f1419; color: #e6e6e6; margin: 0; padding: 24px; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  h2 { font-size: 16px; margin: 28px 0 12px; color: #ccc; }
+  .subtitle { color: #888; margin-bottom: 24px; font-size: 14px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
+  .card { background: #1a2129; border-radius: 10px; padding: 18px; border-left: 5px solid #444; cursor: pointer; transition: transform 0.1s; }
+  .card:hover { transform: translateY(-2px); }
+  .card.normal { border-left-color: #2ecc71; }
+  .card.warning { border-left-color: #f1c40f; }
+  .card.danger { border-left-color: #e74c3c; }
+  .station-name { font-size: 18px; font-weight: 600; margin-bottom: 4px; }
+  .wse { color: #aaa; font-size: 13px; margin-bottom: 12px; }
+  .horizon-row { display: flex; justify-content: space-between; padding: 6px 0; border-top: 1px solid #2a3038; font-size: 14px; }
+  .risk-tag { padding: 2px 10px; border-radius: 12px; font-size: 12px; font-weight: 600; text-transform: uppercase; }
+  .risk-tag.normal { background: #1f4d34; color: #4ade80; }
+  .risk-tag.warning { background: #4d3f1f; color: #facc15; }
+  .risk-tag.danger { background: #4d1f1f; color: #f87171; }
+  .loading { color: #888; }
+  
+
+  #detailPanel { display: none; background: #1a2129; border-radius: 10px; padding: 20px; margin-top: 24px; }
+  #detailPanel.active { display: block; }
+  .close-btn { float: right; cursor: pointer; color: #888; font-size: 20px; }
+  canvas { max-height: 300px; }
+
+  #whatif { background: #1a2129; border-radius: 10px; padding: 20px; margin-top: 24px; }
+  #whatif select, #whatif input[type=range] { width: 100%; margin: 8px 0; }
+  #whatif .row { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+  #whatif .result { font-size: 20px; font-weight: 700; margin-top: 12px; }
+  #whatif .hint { color: #888; font-size: 12px; margin-top: 4px; }
+  .slider-val { font-size: 14px; color: #aaa; }
+  select, button { background: #0f1419; color: #e6e6e6; border: 1px solid #2a3038; border-radius: 6px; padding: 8px; }
+  button { cursor: pointer; }
+  button:hover { background: #1a2129; }
+</style>
+</head>
+<body>
+  <h1>Kosi River Flood Risk Dashboard</h1>
+  <div class="subtitle">Live forecast across 5 monitoring stations — Kosi basin, Bihar</div>
+  <div id="grid" class="grid"><div class="loading">Loading station data...</div></div>
+
+  <div id="detailPanel">
+    <span class="close-btn" onclick="closeDetail()">&times;</span>
+    <h2 id="detailTitle">Station history</h2>
+    <canvas id="historyChart"></canvas>
+  </div>
+
+  <h2>What-If Predictor</h2>
+  <div id="whatif">
+    <div class="row">
+      <div style="flex:1; min-width:180px;">
+        <label>Station</label>
+        <select id="wiStation"></select>
+      </div>
+      <div style="flex:1; min-width:180px;">
+        <label>Forecast horizon</label>
+        <select id="wiHorizon">
+          <option value="24h">24 hours</option>
+          <option value="3day">3 days</option>
+          <option value="5day">5 days</option>
+        </select>
+      </div>
+    </div>
+    <label>Simulated next water level reading (m): <span class="slider-val" id="wiWseVal"></span></label>
+    <input type="range" id="wiWse" min="0" max="100" step="0.1">
+    <div class="hint">This replaces only the most recent reading — the previous 19 real readings stay unchanged, so the model sees a realistic single-step change, not a fabricated trend.</div>
+    <button onclick="runWhatIf()" style="margin-top:8px; padding:8px 16px;">Predict</button>
+    <div class="result" id="wiResult"></div>
+  </div>
+
+<script>
+const API = "";
+let stationsData = [];
+
+async function loadDashboard() {
+  const res = await fetch(`${API}/stations/current`);
+  const data = await res.json();
+  stationsData = data.stations;
+  const grid = document.getElementById("grid");
+  grid.innerHTML = "";
+
+  data.stations.forEach(s => {
+    const primaryRisk = s.forecasts["24h"].predicted_risk;
+    const card = document.createElement("div");
+    card.className = "card " + primaryRisk;
+    card.onclick = () => showDetail(s.station);
+
+    let horizonRows = "";
+    for (const [h, f] of Object.entries(s.forecasts)) {
+      horizonRows += `
+        <div class="horizon-row">
+          <span>${h}</span>
+          <span class="risk-tag ${f.predicted_risk}">${f.predicted_risk} (${Math.round(f.confidence*100)}%)</span>
+        </div>`;
+    }
+
+    card.innerHTML = `
+      <div class="station-name">${s.station}</div>
+      <div class="wse">Latest WSE: ${s.latest_wse} m &middot; ${new Date(s.latest_time).toLocaleString()}</div>
+      ${horizonRows}
+    `;
+    grid.appendChild(card);
+  });
+
+  populateWhatIfStations(data.stations);
+}
+
+let chartInstance = null;
+async function showDetail(station) {
+  const res = await fetch(`${API}/stations/${station}/history`);
+  const hist = await res.json();
+
+  document.getElementById("detailTitle").textContent = `${station} — last readings vs thresholds`;
+  document.getElementById("detailPanel").classList.add("active");
+
+  const labels = hist.readings.map(r => new Date(r.time).toLocaleString());
+  const values = hist.readings.map(r => r.wse);
+
+  if (chartInstance) chartInstance.destroy();
+  const ctx = document.getElementById("historyChart").getContext("2d");
+  chartInstance = new Chart(ctx, {
+    type: "line",
+    data: {
+      labels,
+      datasets: [
+        { label: "Water Level (m)", data: values, borderColor: "#4ade80", tension: 0.3 },
+        { label: "Warning Level", data: labels.map(() => hist.warning_level), borderColor: "#facc15", borderDash: [5,5], pointRadius: 0 },
+        { label: "Danger Level", data: labels.map(() => hist.danger_level), borderColor: "#f87171", borderDash: [5,5], pointRadius: 0 },
+        { label: "HFL", data: labels.map(() => hist.hfl), borderColor: "#a855f7", borderDash: [2,2], pointRadius: 0 },
+      ]
+    },
+    options: {
+      responsive: true,
+      plugins: { legend: { labels: { color: "#ccc" } } },
+      scales: {
+        x: { ticks: { color: "#888", maxRotation: 45 } },
+        y: { ticks: { color: "#888" } }
+      }
+    }
+  });
+
+  window.scrollTo({ top: document.getElementById("detailPanel").offsetTop - 20, behavior: "smooth" });
+}
+
+function closeDetail() {
+  document.getElementById("detailPanel").classList.remove("active");
+}
+
+function populateWhatIfStations(stations) {
+  const sel = document.getElementById("wiStation");
+  if (sel.options.length > 0) return; // already populated
+  stations.forEach(s => {
+    const opt = document.createElement("option");
+    opt.value = s.station;
+    opt.textContent = s.station;
+    sel.appendChild(opt);
+  });
+  sel.onchange = updateSliderRange;
+  updateSliderRange();
+}
+
+function updateSliderRange() {
+  const station = document.getElementById("wiStation").value;
+  const s = stationsData.find(x => x.station === station);
+  if (!s) return;
+  const slider = document.getElementById("wiWse");
+  const center = s.latest_wse;
+  slider.min = (center - 3).toFixed(2);
+  slider.max = (center + 3).toFixed(2);
+  slider.step = 0.05;
+  slider.value = center;
+  document.getElementById("wiWseVal").textContent = center + " m";
+  slider.oninput = () => document.getElementById("wiWseVal").textContent = slider.value + " m";
+}
+
+async function runWhatIf() {
+  const station = document.getElementById("wiStation").value;
+  const horizon = document.getElementById("wiHorizon").value;
+  const wse = parseFloat(document.getElementById("wiWse").value);
+
+  const hist = await (await fetch(`${API}/stations/${station}/history`)).json();
+  const readings = hist.readings.slice(0, -1); // keep real history, drop the last real point
+  const lastTime = new Date(readings[readings.length - 1].time);
+  const nextTime = new Date(lastTime.getTime() + 6 * 60 * 60 * 1000);
+  readings.push({ time: nextTime.toISOString(), wse: wse }); // replace only the newest reading
+
+  const res = await fetch(`${API}/predict`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ station, readings, horizon })
+  });
+  const result = await res.json();
+
+  const tagClass = result.predicted_risk;
+  document.getElementById("wiResult").innerHTML = `
+    Predicted risk: <span class="risk-tag ${tagClass}">${result.predicted_risk}</span>
+    &nbsp; (confidence: ${Math.round(Math.max(...Object.values(result.probabilities))*100)}%)
+  `;
+}
+
+
+
+loadDashboard();
+setInterval(loadDashboard, 30000);
+</script>
+</body>
+</html>
