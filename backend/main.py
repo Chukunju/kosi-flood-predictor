@@ -1,16 +1,25 @@
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from pathlib import Path
 from typing import List
-import pandas as pd
+
 import joblib
-import os
+import pandas as pd
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+
+BASE_DIR = Path(__file__).resolve().parent   # the backend/ folder
+ROOT_DIR = BASE_DIR.parent                   # the project root
+
+MODEL_DIR = ROOT_DIR / "models"
+DATA_PATH = ROOT_DIR / "data" / "processed" / "resampled_stations.parquet"
+STATIC_DIR = BASE_DIR / "static"
 
 app = FastAPI(title="Kosi Flood Risk Predictor")
 
-from fastapi.staticfiles import StaticFiles
-app.mount("/dashboard", StaticFiles(directory="static", html=True), name="dashboard")
+app.mount("/dashboard", StaticFiles(directory=STATIC_DIR, html=True), name="dashboard")
 
-from fastapi.middleware.cors import CORSMiddleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -18,7 +27,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-MODEL_DIR = "../models"
 HORIZONS = ["24h", "3day", "5day"]
 STATIONS = ["Baltara", "Basua", "Birpur", "Jainagar", "Kursela"]
 
@@ -26,12 +34,12 @@ models = {}
 columns = {}
 feature_sets = {}
 for h in HORIZONS:
-    models[h] = joblib.load(os.path.join(MODEL_DIR, f"model_{h}.pkl"))
-    columns[h] = joblib.load(os.path.join(MODEL_DIR, f"columns_{h}.pkl"))
-    feature_sets[h] = joblib.load(os.path.join(MODEL_DIR, f"features_{h}.pkl"))
+    models[h] = joblib.load(MODEL_DIR / f"model_{h}.pkl")
+    columns[h] = joblib.load(MODEL_DIR / f"columns_{h}.pkl")
+    feature_sets[h] = joblib.load(MODEL_DIR / f"features_{h}.pkl")
 
 # resampled_data already carries Danger/Warning/HFL thresholds per row, merged back in notebook 03
-resampled_data = pd.read_parquet("../data/processed/resampled_stations.parquet")
+resampled_data = pd.read_parquet(DATA_PATH)
 
 # per-station thresholds, looked up by name — used by /predict since it doesn't get a full history row otherwise
 thresholds_lookup = (
@@ -76,6 +84,7 @@ def predict_for_horizon(latest: pd.DataFrame, horizon: str):
 class Reading(BaseModel):
     time: str   # ISO format, e.g. "2026-09-20T06:00:00"
     wse: float
+
 
 class PredictRequest(BaseModel):
     station: str
@@ -156,6 +165,6 @@ def station_history(station: str):
     }
 
 
-@app.get("/")
+@app.get("/", include_in_schema=False)
 def root():
-    return {"status": "Kosi Flood Predictor API is running"}
+    return RedirectResponse(url="/dashboard/dashboard.html")
